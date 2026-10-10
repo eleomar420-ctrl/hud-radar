@@ -174,10 +174,33 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--white);min-
 .sinais-painel{width:340px;flex-shrink:0;display:flex;flex-direction:column;gap:12px;}
 
 /* CHART AREA */
-.chart-area{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden;position:relative;min-height:400px;display:flex;align-items:center;justify-content:center;}
-.chart-placeholder{text-align:center;color:var(--gray);}
-.chart-placeholder svg{width:64px;height:64px;color:var(--green);opacity:.3;margin-bottom:12px;}
-.chart-placeholder p{font-size:13px;}
+.chart-area{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden;position:relative;min-height:400px;display:flex;flex-direction:column;}
+
+/* CRASH GAME */
+.crash-hud{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border);z-index:2;}
+.crash-hud-left{display:flex;align-items:center;gap:12px;}
+.crash-round-tag{font-size:9px;font-weight:700;letter-spacing:2px;color:var(--gray);background:var(--bg3);border:1px solid var(--border);padding:3px 10px;border-radius:4px;}
+.crash-status{font-size:10px;font-weight:700;letter-spacing:1px;}
+.crash-status.waiting{color:var(--yellow);}
+.crash-status.running{color:var(--green);}
+.crash-status.crashed{color:var(--red);}
+.crash-hud-right{display:flex;gap:8px;}
+.crash-hist-pill{font-size:10px;font-weight:700;padding:3px 8px;border-radius:4px;font-family:var(--mono);}
+.crash-hist-pill.low{background:rgba(239,68,68,.15);color:var(--red);}
+.crash-hist-pill.mid{background:rgba(168,85,247,.15);color:var(--purple);}
+.crash-hist-pill.high{background:rgba(33,196,94,.15);color:var(--green);}
+.crash-hist-pill.moon{background:rgba(234,179,8,.15);color:var(--yellow);}
+.crash-canvas-wrap{flex:1;position:relative;overflow:hidden;}
+.crash-canvas-wrap canvas{display:block;width:100%;height:100%;}
+.crash-mult-overlay{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:3;pointer-events:none;}
+.crash-mult{font-family:var(--mono);font-weight:900;font-size:72px;text-shadow:0 0 40px rgba(33,196,94,.4);transition:color .2s;}
+.crash-mult.running{color:var(--green);}
+.crash-mult.crashed{color:var(--red);text-shadow:0 0 40px rgba(239,68,68,.4);}
+.crash-mult.waiting{color:var(--yellow);font-size:32px;text-shadow:none;}
+.crash-mult .x{font-size:40px;opacity:.6;}
+.crash-sublabel{font-size:11px;letter-spacing:3px;font-weight:700;margin-top:4px;opacity:.6;}
+.crash-timer-bar{height:3px;background:var(--bg3);overflow:hidden;}
+.crash-timer-fill{height:100%;background:var(--yellow);transition:width .1s linear;}
 
 /* PAINEL DE SINAL */
 .sp-box{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;}
@@ -278,8 +301,22 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--white);min-
   <section class="tela ativo" id="telaSinais">
     <div class="sinais-layout">
       <div class="sinais-main">
-        <div class="chart-area">
-          <iframe src="https://hud-broker.com/client/" class="broker-frame" id="brokerFrame" style="width:100%;height:100%;border:none;"></iframe>
+        <div class="chart-area" id="crashArea">
+          <div class="crash-hud">
+            <div class="crash-hud-left">
+              <span class="crash-round-tag" id="crashRound">RODADA #1</span>
+              <span class="crash-status running" id="crashStatusTxt">SUBINDO</span>
+            </div>
+            <div class="crash-hud-right" id="crashHistory"></div>
+          </div>
+          <div class="crash-timer-bar" id="crashTimerBar"><div class="crash-timer-fill" id="crashTimerFill" style="width:0%"></div></div>
+          <div class="crash-canvas-wrap">
+            <canvas id="crashCanvas"></canvas>
+            <div class="crash-mult-overlay">
+              <div class="crash-mult running" id="crashMult">1.00<span class="x">x</span></div>
+              <div class="crash-sublabel" id="crashSub">MULTIPLICADOR</div>
+            </div>
+          </div>
         </div>
       </div>
       <div class="sinais-painel">
@@ -462,6 +499,262 @@ async function loadPrices() {
     grid.innerHTML = h;
   } catch(e) {}
 }
+
+// ═══ CRASH GAME ENGINE ═══
+(function() {
+  var canvas = document.getElementById('crashCanvas');
+  var ctx = canvas.getContext('2d');
+  var multEl = document.getElementById('crashMult');
+  var subEl = document.getElementById('crashSub');
+  var statusEl = document.getElementById('crashStatusTxt');
+  var roundEl = document.getElementById('crashRound');
+  var historyEl = document.getElementById('crashHistory');
+  var timerFill = document.getElementById('crashTimerFill');
+
+  var state = 'running'; // running | crashed | waiting
+  var roundNum = 1;
+  var startTime = 0;
+  var crashPoint = 0;
+  var currentMult = 1.00;
+  var points = [];
+  var history = [];
+  var dpr = window.devicePixelRatio || 1;
+  var W = 0, H = 0;
+
+  // Generate crash point (provably fair distribution)
+  function genCrashPoint() {
+    // House edge ~4%. Exponential distribution
+    var r = Math.random();
+    if (r < 0.04) return 1.00; // instant crash 4%
+    var h = 0.96;
+    return Math.max(1.00, Math.floor(100 * h / r) / 100);
+  }
+
+  function resize() {
+    var rect = canvas.parentElement.getBoundingClientRect();
+    W = rect.width;
+    H = rect.height;
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function startRound() {
+    state = 'running';
+    crashPoint = genCrashPoint();
+    startTime = performance.now();
+    currentMult = 1.00;
+    points = [];
+    multEl.className = 'crash-mult running';
+    statusEl.textContent = 'SUBINDO';
+    statusEl.className = 'crash-status running';
+    subEl.textContent = 'MULTIPLICADOR';
+    timerFill.style.width = '0%';
+    roundEl.textContent = 'RODADA #' + roundNum;
+  }
+
+  function crashRound() {
+    state = 'crashed';
+    multEl.innerHTML = currentMult.toFixed(2) + '<span class="x">x</span>';
+    multEl.className = 'crash-mult crashed';
+    statusEl.textContent = 'CRASHED';
+    statusEl.className = 'crash-status crashed';
+    subEl.textContent = 'RODADA ENCERRADA';
+
+    // Add to history
+    history.unshift(currentMult);
+    if (history.length > 12) history.length = 12;
+    renderHistory();
+
+    // Wait then start next
+    var waitTime = 4000 + Math.random() * 2000;
+    var waitStart = performance.now();
+    state = 'waiting_crash'; // brief flash
+
+    setTimeout(function() {
+      state = 'waiting';
+      var countDown = 5;
+      multEl.className = 'crash-mult waiting';
+      statusEl.textContent = 'AGUARDANDO';
+      statusEl.className = 'crash-status waiting';
+
+      var cd = setInterval(function() {
+        multEl.innerHTML = countDown.toFixed(1) + 's';
+        subEl.textContent = 'PRÓXIMA RODADA';
+        timerFill.style.width = ((5 - countDown) / 5 * 100) + '%';
+        countDown -= 0.1;
+        if (countDown <= 0) {
+          clearInterval(cd);
+          roundNum++;
+          startRound();
+        }
+      }, 100);
+    }, 1500);
+  }
+
+  function renderHistory() {
+    var h = '';
+    history.forEach(function(m) {
+      var cls = m < 1.5 ? 'low' : m < 3 ? 'mid' : m < 10 ? 'high' : 'moon';
+      h += '<span class="crash-hist-pill ' + cls + '">' + m.toFixed(2) + 'x</span>';
+    });
+    historyEl.innerHTML = h;
+  }
+
+  // Seed some history
+  for (var i = 0; i < 8; i++) {
+    history.push(genCrashPoint());
+  }
+  renderHistory();
+
+  function drawGrid() {
+    var padL = 50, padB = 30, padT = 10, padR = 20;
+    var gW = W - padL - padR;
+    var gH = H - padB - padT;
+
+    // Background gradient
+    ctx.fillStyle = '#0c1410';
+    ctx.fillRect(0, 0, W, H);
+
+    // Grid lines
+    ctx.strokeStyle = 'rgba(26,48,37,.5)';
+    ctx.lineWidth = 0.5;
+
+    // Horizontal lines (multiplier axis)
+    var maxMult = Math.max(currentMult * 1.3, 2);
+    var step = maxMult <= 3 ? 0.5 : maxMult <= 10 ? 1 : maxMult <= 50 ? 5 : 10;
+    ctx.font = '10px JetBrains Mono, monospace';
+    ctx.fillStyle = '#6b8577';
+    ctx.textAlign = 'right';
+
+    for (var m = 1; m <= maxMult; m += step) {
+      var y = padT + gH - ((m - 1) / (maxMult - 1)) * gH;
+      ctx.beginPath();
+      ctx.moveTo(padL, y);
+      ctx.lineTo(W - padR, y);
+      ctx.stroke();
+      ctx.fillText(m.toFixed(step < 1 ? 1 : 0) + 'x', padL - 6, y + 3);
+    }
+
+    // Vertical lines (time axis)
+    var elapsed = (performance.now() - startTime) / 1000;
+    var maxTime = Math.max(elapsed * 1.3, 5);
+    var tStep = maxTime <= 10 ? 1 : maxTime <= 30 ? 5 : 10;
+    ctx.textAlign = 'center';
+    for (var t = 0; t <= maxTime; t += tStep) {
+      var x = padL + (t / maxTime) * gW;
+      ctx.beginPath();
+      ctx.moveTo(x, padT);
+      ctx.lineTo(x, H - padB);
+      ctx.stroke();
+      ctx.fillText(t.toFixed(0) + 's', x, H - padB + 14);
+    }
+
+    return { padL: padL, padB: padB, padT: padT, padR: padR, gW: gW, gH: gH, maxMult: maxMult, maxTime: maxTime };
+  }
+
+  function drawLine(g) {
+    if (points.length < 2) return;
+
+    var padL = g.padL, padT = g.padT, gW = g.gW, gH = g.gH;
+
+    // Gradient fill under curve
+    var gradient = ctx.createLinearGradient(0, padT, 0, padT + gH);
+    if (state === 'running') {
+      gradient.addColorStop(0, 'rgba(33,196,94,.25)');
+      gradient.addColorStop(1, 'rgba(33,196,94,.01)');
+    } else {
+      gradient.addColorStop(0, 'rgba(239,68,68,.20)');
+      gradient.addColorStop(1, 'rgba(239,68,68,.01)');
+    }
+
+    // Map points to canvas coords
+    var coords = points.map(function(p) {
+      var x = padL + (p.t / g.maxTime) * gW;
+      var y = padT + gH - ((p.m - 1) / (g.maxMult - 1)) * gH;
+      return { x: x, y: y };
+    });
+
+    // Fill area
+    ctx.beginPath();
+    ctx.moveTo(coords[0].x, padT + gH);
+    coords.forEach(function(c) { ctx.lineTo(c.x, c.y); });
+    ctx.lineTo(coords[coords.length-1].x, padT + gH);
+    ctx.closePath();
+    ctx.fillStyle = gradient;
+    ctx.fill();
+
+    // Draw line
+    ctx.beginPath();
+    ctx.moveTo(coords[0].x, coords[0].y);
+    for (var i = 1; i < coords.length; i++) {
+      ctx.lineTo(coords[i].x, coords[i].y);
+    }
+    ctx.strokeStyle = state === 'running' ? '#21c45e' : '#ef4444';
+    ctx.lineWidth = 2.5;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+
+    // Glow on the tip
+    if (state === 'running' && coords.length > 0) {
+      var tip = coords[coords.length - 1];
+      ctx.beginPath();
+      ctx.arc(tip.x, tip.y, 5, 0, Math.PI * 2);
+      ctx.fillStyle = '#21c45e';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(tip.x, tip.y, 10, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(33,196,94,.3)';
+      ctx.fill();
+    }
+
+    // Crashed X marker
+    if (state !== 'running' && coords.length > 0) {
+      var last = coords[coords.length - 1];
+      ctx.font = 'bold 24px Inter, sans-serif';
+      ctx.fillStyle = '#ef4444';
+      ctx.textAlign = 'center';
+      ctx.fillText('✕', last.x, last.y - 12);
+    }
+  }
+
+  function frame() {
+    resize();
+
+    if (state === 'running') {
+      var elapsed = (performance.now() - startTime) / 1000;
+      // Exponential growth: mult = e^(speed * t)
+      var speed = 0.06 + Math.random() * 0.002; // slight randomness in feel
+      currentMult = Math.pow(Math.E, 0.08 * elapsed);
+      currentMult = Math.round(currentMult * 100) / 100;
+
+      points.push({ t: elapsed, m: currentMult });
+      // Thin old points if too many
+      if (points.length > 600) {
+        var newPts = [];
+        for (var i = 0; i < points.length; i += 2) newPts.push(points[i]);
+        newPts.push(points[points.length - 1]);
+        points = newPts;
+      }
+
+      multEl.innerHTML = currentMult.toFixed(2) + '<span class="x">x</span>';
+
+      if (currentMult >= crashPoint) {
+        crashRound();
+      }
+    }
+
+    var g = drawGrid();
+    drawLine(g);
+
+    requestAnimationFrame(frame);
+  }
+
+  startRound();
+  requestAnimationFrame(frame);
+})();
 
 // INIT
 loadPrices();
